@@ -2,13 +2,12 @@
 
 source "https://rubygems.org"
 
-gem "jekyll-theme-chirpy", "~> 7.6"
+gem "jekyll-theme-chirpy", "~> 7.0", ">= 7.0.1"
 
-gem "html-proofer", "~> 5.0", group: :test
-
-platforms :windows, :jruby do
-  gem "tzinfo", ">= 1", "< 3"
-  gem "tzinfo-data"
+# Windows needs explicit timezone data gems
+gem "tzinfo"
+gem "tzinfo-data", platforms: [:mingw, :mswin, :x64_mingw, :jruby]
+gem 'jekyll-compose', group: [:jekyll_plugins]
+group :test do
+  gem "html-proofer", "~> 5.0"
 end
-
-gem "wdm", "~> 0.2.0", :platforms => [:windows]
