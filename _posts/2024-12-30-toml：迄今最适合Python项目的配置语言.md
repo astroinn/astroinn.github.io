@@ -1,203 +1,135 @@
 ---
-title: "toml：迄今最适合 Python 项目的配置语言"
+title: "TOML：迄今最适合 Python 项目的配置语言"
 date: 2024-12-30 8:00:00 +0800
 categories: [Python Features]
 tags: [Python, toml]
 ---
 
+Python、Java 用来编写和运行程序；JSON、YAML 和 TOML 则主要用来表示数据。写 Python 项目的配置文件时，我尤其喜欢 TOML：语法简洁，数据类型也能自然地映射到 Python。Python 项目常用的 `pyproject.toml`，就是一个典型例子。
 
-一些语言用于编写和运行程序，比如我们熟知的 Python Java 等等；还有些语言只用来传递信息，例如 JSON、YAML，和这次要介绍的 toml。
+下面从一份 `config.toml` 开始，看看它的基本语法，以及如何在 Python 中读取它。
 
-Toml 是目前最适合 Python 项目的配置语言。
+## TOML 的基本语法
 
-## Toml 的语法
+如果你使用 VS Code，可以按需安装 *Even Better TOML* 扩展，获得更丰富的编辑体验。
 
-Toml 适合 Python主要体现在两点，一是语法非常相似，二是类型完美对应，随着后面的例子你会理解这两点。
+### 注释与键值对
 
-首先，创建一个新的 toml 文件。
-
-如果你和我一样使用 vscode，vscode 没有内置对 toml 的颜色高亮，我们需要通过插件实现。我使用的插件是 *Even Better Toml*。
-
-### 注释
-
-toml 的注释和 Python 一样，在行首使用 `#` 就可以了。
+TOML 用 `#` 表示注释，既可以单独占一行，也可以写在键值对后面。键和值用 `=` 连接：
 
 ```toml
-## This is a toml file.
+# config.toml
+name = 'Astroinn'
+version = 1
+enabled = true
+topics = ['Python', 'TOML', 'blogging']
+created_at = 2024-12-30T00:00:00Z
 ```
 
-### 键值对
-
-创建键值对只需要等号就可定义，而且可以使用许多 Python 中的类型，先写一下比较熟悉的整数、字符串列表。
+单引号和双引号都能表示字符串，但两者并不完全相同。双引号字符串支持 `\n` 等转义序列；单引号字符串按字面保留内容。例如：
 
 ```toml
-name = 'Hucci'
-age = 59
-sex = "Female"
-hobbies = ['coding', 'reading', 'traveling']
-birthdate = 1960-01-01T00:00:00Z
+description = "Astroinn says: \"Hello!\""
 ```
 
-你可以看到我同时使用了单引号和双引号，这在 toml 中是合法的。不像 json 只认双引号。不过即使都合法，也会有细微的区别，如果要使用转义字符，就只能在双引号里面使用，不能在单引号里面使用。虽然转义字符不常用，但我们还是知道一下吧。
+这里的整数、布尔值、字符串和数组都很直观。`created_at` 也不是普通字符串，而是带 UTC 时区的日期时间值。更多类型和语法细节可以查阅 [TOML 规范](https://toml.io/en/v1.0.0)。
 
-```toml
-sex = "\"Female\""
-```
+### 用 Python 读取 TOML
 
-除了这些常见类型，经常被解析为字符串的日期时间都也被正确解析。
-
-这样我们就写好了一个简单的 toml 文件。
-
-### 读取 toml
-
-tomllib是 Python 3.11 中引入的标准库模块，用于解析 TOML 文件。如果你使用的是 Python 3.11 或更高版本，则不需要安装 tomllib，因为它已经包含在标准库中。
-
-如果你使用的是 Python 3.10 或更低版本，就需要 `pip install toml`。
+Python 3.11 起，标准库提供了只负责读取 TOML 的 `tomllib`。把上面的内容保存为 `config.toml`，再运行：
 
 ```python
-## read_toml.py
+# read_toml.py
 import tomllib
+from pprint import pp
 
-with open('config.tml', 'br') as f:
+with open('config.toml', 'rb') as f:
     config = tomllib.load(f)
+
+pp(config)
 ```
 
-这里需要说明打开方式是以二进制仅读取的方式打开。
+`tomllib.load()` 接收以二进制模式打开的文件，所以这里使用 `'rb'`。输出类似下面这样：
 
-为了更方便地查看结果，我需要 `from pprint import pp`。
-
-这样就将我们刚刚的 toml 读取为了一个字典。
-
-```
-{'name': 'Hucci',
-'birthdate': datetime.datetime(1960, 1, 1, 0, 0, tzinfo=datetime.timezone.utc),
-'age': 59,
-'sex': 'Female',
-'hobbies': ['coding', 'swimming']}
+```text
+{'name': 'Astroinn',
+ 'version': 1,
+ 'enabled': True,
+ 'topics': ['Python', 'TOML', 'blogging'],
+ 'created_at': datetime.datetime(2024, 12, 30, 0, 0, tzinfo=datetime.timezone.utc)}
 ```
 
-所有的类型都正确解析了，包括日期时间也正确解析为 datetime 类型。
+可以看到，TOML 的整数、布尔值和数组分别变成了 Python 的 `int`、`bool` 和 `list`，带时区的日期时间变成了 `datetime.datetime`。如果使用 Python 3.10 或更早版本，可以选择第三方解析库；上面的 `tomllib` 代码需要 Python 3.11 或更新版本。具体类型映射见 [Python 官方文档](https://docs.python.org/3/library/tomllib.html)。
 
-### Inline_table
+### 内联表
 
-Toml 的类型和 Python 的类型几乎是一一对应，字符串对应字符串，整数对应整数，列表对应列表，时间对应时间。就连 Toml 中唯一一个听起来有点陌生的类型 table，也对应了 Python 的字典。
-
-创建一个 table 很容易，就像字典一样用花括号，非常符合 Python 思维。比如我的 shape 是身高一米体重 50。
+TOML 的表对应 Python 的字典。内容较少时，可以用花括号写成内联表：
 
 ```toml
-shape = {height = 1, weight = 50}
+shape = { height = 1, weight = 50 }
 ```
 
-解析出来就是 shape 所对应的 value 是一个字典。
+解析后，`config['shape']` 是 `{'height': 1, 'weight': 50}`。内联表适合简短的数据；内容变多时，普通表更容易阅读。
 
-```
-{'name': 'Hucci',
-'birthdate': datetime.datetime(1960, 1, 1, 0, 0, tzinfo=datetime.timezone.utc),
-'age': 59,
-'sex': 'Female',
-'hobbies': ['coding', 'swimming'],
-'shape': {'height': 1, 'weight': 50}}
-```
+### 普通表与嵌套表
 
-### 创建表
-
-但大部分情况下，我们的配置是层层叠叠的嵌套表，如果用花括号这种写法就太复杂难看了。
-
-所以会使用另一种写法，toml 中创建表的写法，用方括号括起 table 的名称。比如说我要写我的各个账号的 username。
+用方括号声明表，后面的键值对就属于这个表，直到遇到下一个表头：
 
 ```toml
 [account]
-bilibili = 'hucciB'
-youtube = 'hucciY'
+bilibili = 'astroinnB'
+youtube = 'astroinnY'
 ```
 
-这样解析的结果 social 所对应的 value 是一个字典，字典的 key 分别是 bilibili 和 youtube。
-
-```
-{'name': 'Hucci',
-'birthdate': datetime.datetime(1960, 1, 1, 0, 0, tzinfo=datetime.timezone.utc),
-'age': 59,
-'sex': 'Female',
-'hobbies': ['coding', 'swimming'],
-'shape': {'height': 1, 'weight': 50},
-'account': {'bilibili': 'hucciB', 'youtube': 'hucciY'}}
-```
-
-### 在表中再嵌套表
-
-如果说我想再在这个表里面嵌套，比如说 bilibili 这个 key 所对应的又是一张表，表里面有 username 和 password 两个 key。就要这样写
+这会得到 `{'account': {'bilibili': 'astroinnB', 'youtube': 'astroinnY'}}`。如果一个平台需要保存多个字段，可以用点号创建嵌套结构：
 
 ```toml
 [account]
-bilibili.username = 'hucciB'
-bilibili.password = 'hucciBPW'
-youtube = 'hucciY'
+bilibili.username = 'astroinnB'
+bilibili.followers = 100
+youtube = 'astroinnY'
 ```
 
-这个 `.` 的写法也很符合 Python 的风格。
-
-```
-{'name': 'Hucci',
-'birthdate': datetime.datetime(1960, 1, 1, 0, 0, tzinfo=datetime.timezone.utc),
-'age': 59,
-'sex': 'Female',
-'hobbies': ['coding', 'swimming'],
-'shape': {'height': 1, 'weight': 50},
-'account': {'bilibili': {'username': 'hucciB', 'password': 'hucciBPW'},
-            'youtube': 'hucciY'}}
-```
-
-这个嵌套还可以继续嵌套下去，只要愿意加足够的 `.`。
-
-现在 social 这一项关于 bilibili 有两行，如果除了 username 和 password 我还想写什么关注数，网址链接等信息，看起来就会很杂乱。我们可以通过方括号的写法来合并同类项。
+此时 `config['account']['bilibili']` 是 `{'username': 'astroinnB', 'followers': 100}`。字段多了之后，还可以改用嵌套表，让同一平台的配置放在一起：
 
 ```toml
 [account]
-## bilibili.username = 'hucciB'
-## bilibili.password = 'hucciBPW'
-youtube = 'hucciY'
+youtube = 'astroinnY'
 
-## 创建一张account中的bilibili的表
 [account.bilibili]
-username = 'hucciB'
-password = 'hucciBPW'
+username = 'astroinnB'
+followers = 100
 ```
 
-这两种写法完全等价。
+上面两段配置会解析成相同的结构。它们是两种独立写法，不要同时放进同一个文件，否则会重复定义键。
 
-### Table group
+### 表数组
 
-再介绍最后一种语法 table group。现在假设要给每一个平台，都用这样的格式说明 username 和 password，用包含字典的列表来写会非常方便。
-
-```toml
-account = [
-    {'platform'= 'bilibili', 'username'= 'hucciB', 'password'= 'hucciBPW'},
-    {'platform'= 'youtube', 'username'= 'hucciY', 'password'= 'hucciYPW'}
-]
-```
-
-更 toml 的写法，是用两个方括号来说明是列表中的字典，就像这样。
+如果每个平台都需要相同的字段，可以把它们组织成一组表。TOML 使用双层方括号 `[[account]]` 表示表数组：
 
 ```toml
 [[account]]
 platform = 'bilibili'
-username = 'hucciB'
-password = 'hucciBPW'
+username = 'astroinnB'
 
 [[account]]
 platform = 'youtube'
-username = 'hucciY'
-password = 'hucciYPW'
+username = 'astroinnY'
 ```
 
-到这里，我们就介绍完了 toml 的所有基本语法。
+解析后，`config['account']` 是一个列表，里面依次放着两个字典：
 
-## 为什么要用专门的配置语言
+```python
+[
+    {'platform': 'bilibili', 'username': 'astroinnB'},
+    {'platform': 'youtube', 'username': 'astroinnY'},
+]
+```
 
-你可能会奇怪，明明可以直接用 python 写 config，为什么要用专门的配置语言呢？我之前在介绍 `.env` 文件存储环境变量时，也遇到了这样的疑问。
+这一段也是独立示例：普通表 `[account]` 和表数组 `[[account]]` 不能在同一份 TOML 文件中定义为同一个键。
 
-最主要是从安全性考虑。Python 文件是可执行代码，我们 import 时候会执行这些代码，存在一定安全隐患；而 YAML/JSON/TOML 等等是纯数据，避免了执行代码的风险。
+## 为什么使用专门的配置格式
 
-## Outro
+直接用 Python 文件写配置也可以，但导入模块时会执行其中的代码。TOML 是数据格式，解析配置时不会执行任意 Python 语句；同时，它的类型明确，适合保存项目设置。不过，数据格式本身并不能保证配置内容可信，也不适合把真实密码直接写进会提交到仓库的文件。
 
-最后总结一下，我们介绍了配置语言 toml 的语法，说明为什么它适合 Python，并说明为什么要用专门的配置语言而不是用 Python 写 config。
+对 Python 项目来说，TOML 的实用之处在于：写起来清楚，读入后又能方便地得到字典、列表和日期时间等 Python 对象。需要项目配置时，可以先从一份简单的 `config.toml` 开始。

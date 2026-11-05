@@ -5,15 +5,13 @@ categories: [Networking]
 tags: [wireguard, vpn, docker, fnos, iptables]
 ---
 
+外网连上 WireGuard 后，我能打开 FNOS 页面，却打不开同一台 NAS 上映射到宿主机端口的 Docker 服务。这篇记录当时检查了哪些规则、尝试了什么，以及哪一步之后访问恢复正常。
 
-# WireGuard 外网无法访问 FNOS Docker 服务 - 排查记录
-
-## TL;DR
+## 先说结果
 
 - **现象**：WireGuard 远端只能打开 FNOS 自身服务，映射到 Docker 的端口全部超时。
-- **根因**：FNOS 的 `FORWARD` 链默认 DROP，且 iStoreOS 没有对 VPN 网段做 SNAT，导致请求进容器但回包无路可走。
-- **修复**：在 FNOS `DOCKER-USER` 链放行 `192.168.6.0/24`，在 iStoreOS 对 `10.0.0.0/24` 做 `MASQUERADE`，并持久化规则。
-- **快速入口**：[直接查看最终修复命令](#最终修复命令)
+- **有效的改动**：在 iStoreOS 上为 WireGuard 来源、发往 LAN 接口的流量临时添加 `MASQUERADE` 规则后，Docker 服务可以访问了。
+- **尚未证实的部分**：我此前也在 FNOS 的 `DOCKER-USER` 链添加了放行规则。单凭现有记录，无法判断它是否同样必要，也无法确定回包具体在哪一跳丢失。
 
 ## 环境信息
 
@@ -53,48 +51,48 @@ peer: ...
     allowed ips: 10.0.0.10/32
 ```
 
-确认 VPN 网段为 `10.0.0.0/24`。
+这条输出说明该 peer 使用 `10.0.0.10/32`。本文后续使用的 `10.0.0.0/24` 是当时配置中的 VPN 地址段，不能仅由这条输出推断出来。
 
 ---
 
-### 第二步：分析为何 FNOS 页面能访问，Docker 不能
+### 第二步：区分宿主机服务和 Docker 端口的流量路径
 
 | 访问目标 | 流量路径 | 经过的链 | 结果 |
 |---|---|---|---|
-| FNOS 页面 | 直接到 FNOS 本机进程 | `INPUT` 链（policy ACCEPT） | ✅ |
-| Docker 服务 | 需转发到 Docker 容器 | `FORWARD` 链（policy DROP） | ❌ |
+| FNOS 页面 | 到 FNOS 本机进程 | 通常经过 `INPUT` 链 | 可以访问 |
+| Docker 映射端口 | 经 Docker 的端口映射转发到容器 | 可能经过 `FORWARD` 和 Docker 创建的链 | 访问超时 |
 
-**关键原理：**
-- FNOS 页面是跑在宿主机进程上的，流量终点是本机，走 `INPUT` 链，默认 ACCEPT。
-- Docker 容器服务虽然映射了端口，但容器在虚拟网桥（`br-xxxxx`）里，流量需要从宿主机网卡**转发**到 Docker 网桥，必须经过 `FORWARD` 链，而默认是 DROP。
+这提示我先检查 FNOS 的转发规则。Docker 的桥接网络和端口映射会创建自己的防火墙链，因此不能仅看 `FORWARD` 链的默认策略，还要看实际匹配到的规则及计数器。具体处理路径取决于网络模式和防火墙后端，参见 [Docker 官方文档](https://docs.docker.com/engine/network/firewall-iptables/)。
 
 ---
 
-### 第三步：发现 FNOS 的 FORWARD 链默认 DROP
+### 第三步：检查 FNOS 的 FORWARD 链
 
 ```bash
 sudo iptables -L -n -v
 ```
 
 ```
-Chain FORWARD (policy DROP)  ← 默认丢弃所有转发流量
+Chain FORWARD (policy DROP)
 ```
+
+这是 `FORWARD` 链的默认策略，不表示所有到容器的包都会被丢弃：如果前面的规则已放行，数据包就不会走到默认策略。这里还需要结合完整规则和计数器判断。
 
 ---
 
 ### 第四步：在 FNOS 的 DOCKER-USER 链添加放行规则
 
-> `DOCKER-USER` 是 Docker 专门留给用户自定义规则的链，在所有 Docker 规则之前执行。
+在使用 iptables 后端的 Docker 环境中，`DOCKER-USER` 用于放置先于 Docker 转发规则处理的用户规则。添加前应先确认实际源地址和已有规则。
 
 ```bash
 sudo iptables -I DOCKER-USER -s 192.168.6.0/24 -j ACCEPT
 ```
 
-添加后数据包能到达 Docker 容器，但访问仍然超时。
+添加后访问仍然超时。这只能说明单独添加这条规则没有解决问题，不能据此确认请求已进入容器。
 
 ---
 
-### 第五步：发现回程流量有去无回
+### 第五步：观察规则计数器
 
 通过监控 iptables 数据包计数：
 
@@ -102,9 +100,7 @@ sudo iptables -I DOCKER-USER -s 192.168.6.0/24 -j ACCEPT
 watch -n 1 'sudo iptables -L DOCKER-USER -n -v && echo "---" && sudo iptables -L DOCKER -n -v'
 ```
 
-发现数据包能进去，但浏览器一直超时 → 说明**请求到了，但回包回不来**。
-
-问题定位到 **iStoreOS 的 NAT 配置**。
+当时看到相关规则的计数器变化，但浏览器依然超时。这表明有流量命中了规则；仅靠计数器还不能证明容器收到了请求，也不能断定回包丢在了哪里。接下来我转向 iStoreOS 的 NAT 规则。
 
 ---
 
@@ -114,17 +110,17 @@ watch -n 1 'sudo iptables -L DOCKER-USER -n -v && echo "---" && sudo iptables -L
 iptables -t nat -L zone_lan_postrouting -n -v
 ```
 
-发现 iStoreOS 只对**特定端口**配置了 SNAT（reflection），例如：
+当时看到一条针对特定端口的 SNAT 规则，例如：
 
 ```
-SNAT  tcp  --  10.0.0.0/24  192.168.6.111  tcp dpt:5666  to:10.0.0.1  ✅ 有规则
+SNAT  tcp  --  10.0.0.0/24  192.168.6.111  tcp dpt:5666  to:10.0.0.1
 ```
 
-但 Docker 服务端口（如 `3000`、`3001`）**没有对应的 SNAT 规则**，导致回包迷路，无法返回给 VPN 客户端。
+没有看到 Docker 服务端口（如 `3000`、`3001`）对应的规则。这使我怀疑回程路由或源地址转换有问题，但仍需结合抓包或路由表才能确定具体原因。
 
 ---
 
-### 第七步：对 WireGuard 流量添加全局 MASQUERADE
+### 第七步：临时添加 MASQUERADE 规则
 
 在 iStoreOS 上执行：
 
@@ -132,68 +128,30 @@ SNAT  tcp  --  10.0.0.0/24  192.168.6.111  tcp dpt:5666  to:10.0.0.1  ✅ 有规
 iptables -t nat -I POSTROUTING -s 10.0.0.0/24 -o br-lan -j MASQUERADE
 ```
 
-问题解决 ✅
+添加后，从 WireGuard 客户端访问这些 Docker 端口恢复正常。这是当时确认有效的一步。规则匹配 VPN 来源、经 `br-lan` 发出的流量，并非只针对某个 Docker 端口。
 
 ---
 
-## 根本原因分析
+## 这次能确认什么
 
-### 修复前的流量路径
+我能确认的结果是：添加 iStoreOS 的 `MASQUERADE` 规则前，访问 Docker 端口仍然超时；添加后，访问恢复正常。这支持“源地址转换或回程路径与故障有关”的判断，但不能单独证明 FNOS 的 `FORWARD` 默认策略就是根因，也不能确认回包具体在哪一跳丢失。
 
-```mermaid
-flowchart TD
-    Client[外网设备 10.0.0.10] -->|WireGuard| WG[iStoreOS]
-    WG -->|无 SNAT| FNOS[FNOS 宿主机]
-    FNOS -->|FORWARD→Docker| Container[Docker 容器]
-    Container -->|回包 10.0.0.10| Drop[路由失败 / 超时]
-```
+`MASQUERADE` 会把匹配流量的源地址改为路由器在出接口上的地址。这样做可能让回程流量按已有路径返回，但 FNOS 看到的就不再是客户端原本的 `10.0.0.x` 地址。如果以后需要保留真实客户端 IP，应进一步检查 FNOS 的返回路由，而不是直接照搬这条 NAT 规则。
 
-### 修复后的流量路径
+## 规则持久化：先确认防火墙版本
 
-```mermaid
-flowchart TD
-    Client[外网设备 10.0.0.10] -->|WireGuard| WG[iStoreOS]
-    WG -->|SNAT→192.168.6.1| FNOS[FNOS 宿主机]
-    FNOS --> Container[Docker 容器]
-    Container -->|回包 192.168.6.1| WG
-    WG -->|还原→10.0.0.10| Client
-```
-
----
-
-## 最终修复命令
-
-### FNOS 上
+上面的 `iptables -I` 命令是**临时测试**。原记录把向 `/etc/firewall.user` 追加同一条命令写成了通用的永久方案，这一点需要更正：OpenWrt 22.03 起默认使用 fw4（nftables）；`/etc/firewall.user` 是否加载、其中的 iptables 命令是否可用，都取决于实际版本和配置。仅仅追加文本并不能保证重启后生效。可先在 iStoreOS 上检查：
 
 ```bash
-# 添加放行规则
-sudo iptables -I DOCKER-USER -s 192.168.6.0/24 -j ACCEPT
-
-# 永久保存（防止重启失效）
-sudo apt install iptables-persistent -y
-sudo netfilter-persistent save
+command -v fw4
+command -v fw3
+uci show firewall | grep -E 'include|fw4_compatible'
 ```
 
-> 💾 FNOS 每次规则变更后都要 `netfilter-persistent save`，否则重启即失效。
+如果使用 fw4，应按 [OpenWrt 防火墙文档](https://openwrt.org/docs/guide-user/firewall/firewall_configuration)配置并验证持久化规则；如果使用旧版 fw3，也要确认 `/etc/firewall.user` 被引用，并在重启防火墙后核对规则是否还在。本文没有记录这台 iStoreOS 的具体防火墙版本或重启后的验证结果，因此不把临时命令写成已经验证的永久修复。
 
-### iStoreOS 上
+FNOS 上的 `DOCKER-USER` 放行规则也要按实际 Docker 防火墙后端检查，不能仅凭 `iptables-persistent` 已保存就认定重启后仍会按预期生效。这条规则放行整个 `192.168.6.0/24` 的转发流量，范围也比单个 Docker 服务更宽；若确认需要长期保留，应结合实际源地址、目标端口和网桥接口缩小匹配范围。
 
-```bash
-# 添加 MASQUERADE 规则（临时，立即生效）
-iptables -t nat -I POSTROUTING -s 10.0.0.0/24 -o br-lan -j MASQUERADE
+## 总结
 
-# 永久保存（写入 OpenWrt 配置，防止重启失效）
-cat >> /etc/firewall.user << 'EOF'
-iptables -t nat -I POSTROUTING -s 10.0.0.0/24 -o br-lan -j MASQUERADE
-EOF
-```
-
-> 💾 OpenWrt/iStoreOS 可通过 `uci` 写 firewall 规则，但在 `firewall.user` 里追加同样生效。
-
----
-
-## 注意事项
-
-- ⚠️ iStoreOS 上的临时 iptables 规则**重启后会消失**，必须执行持久化命令。
-- ⚠️ FNOS 上同理，需要 `netfilter-persistent save` 保存规则。
-- 💡 如果后续新增 Docker 服务端口，**无需额外配置**，MASQUERADE 规则对所有端口生效。
+这次排查最有用的线索是：宿主机服务可访问、Docker 映射端口超时，而在 iStoreOS 上临时添加源地址转换后访问恢复。`FORWARD` 默认 DROP、规则计数器增加和缺少某个端口的 SNAT 规则，都是排查线索，不足以单独证明完整的故障链路。后续若要把修复长期保留下来，还需要确认防火墙后端、规则加载方式，并在重启后复测。

@@ -7,7 +7,7 @@ tags: [Jekyll, jekyll-compose, 博客, 写作效率]
 
 ## 前言
 
-手动在 `_posts/` 目录创建 `YYYY-MM-DD-title.md` 文件、复制粘贴 Front Matter 模板……时间久了你一定觉得繁琐。**jekyll-compose** 是 Jekyll 官方维护的插件，为你提供一组便捷的命令行工具，让文章的创建、发布、重命名都变成一条命令的事。
+如果经常手动创建 `_posts/` 下的文件、复制 Front Matter，`jekyll-compose` 可以省去这些重复操作。它提供创建草稿、发布和重命名等 Jekyll 命令。下面按实际写作流程介绍用法；具体命令以 [项目说明](https://github.com/jekyll/jekyll-compose) 为准。
 
 ---
 
@@ -54,7 +54,7 @@ bundle exec jekyll help
 
 ## 推荐工作流：草稿 → 发布
 
-相比直接创建文章，使用 **草稿工作流** 更加规范：
+如果一篇文章还要反复修改，可以先写草稿，再决定何时发布：
 
 ### 第一步：创建草稿
 
@@ -62,7 +62,7 @@ bundle exec jekyll help
 bundle exec jekyll draft "Kubernetes Pod 生命周期详解"
 ```
 
-这会在 `_drafts/` 目录生成 `kubernetes-pod-生命周期详解.md`，文件中自动包含基础 Front Matter。
+这会在 `_drafts/` 目录生成草稿文件，并写入基础 Front Matter。实际文件名以命令输出为准。
 
 ### 第二步：本地预览草稿
 
@@ -170,7 +170,7 @@ export JEKYLL_EDITOR="code"
 
 ## 自定义文件名格式
 
-默认情况下，jekyll-compose 会将标题中的空格替换为 `-`。如果需要自定义文件名 slug，可以在创建时使用 `--source` 指定，或者创建后用 `rename` 命令修改：
+如果创建后想调整文章标题和文件名，可以使用 `rename` 命令：
 
 ```bash
 # 创建后觉得文件名太长，重命名
@@ -240,7 +240,7 @@ jekyll-compose 只是本地命令行工具，它帮你生成和管理文件，�
 | 重命名 | 改文件名 + 改 Front Matter 中的 title | `jekyll rename` 自动同步 |
 | Front Matter | 每次复制粘贴模板 | 配置一次，自动生成 |
 
-jekyll-compose 虽然小巧，但能显著提升 Jekyll 博客的日常写作效率。推荐每个 Jekyll 用户都装上。
+如果经常创建草稿、改标题或手动填写 Front Matter，`jekyll-compose` 值得试试；只偶尔写一篇文章，手动创建文件也完全够用。
 
 ---
 
