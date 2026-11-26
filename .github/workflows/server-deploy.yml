@@ -1,0 +1,123 @@
+name: Build and Deploy to Server
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: server-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      JEKYLL_ENV: production
+      SITE_URL: https://202252.xyz
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+          bundler-cache: true
+
+      - name: Build for server domain
+        shell: bash
+        run: |
+          set -euo pipefail
+          ruby -ryaml -ruri -e '
+            url = ENV.fetch("SITE_URL")
+            uri = URI.parse(url)
+            abort "SITE_URL must be an origin such as https://202252.xyz (no trailing slash)" unless
+              %w[http https].include?(uri.scheme) && uri.host && !uri.userinfo &&
+              uri.path.empty? && !uri.query && !uri.fragment
+            config = YAML.load_file("_config.yml")
+            config["url"] = url
+            config["baseurl"] = ""
+            File.write(ENV.fetch("RUNNER_TEMP") + "/server-config.yml", config.to_yaml)
+          '
+          bundle exec jekyll build --config "$RUNNER_TEMP/server-config.yml"
+          test -s _site/index.html
+
+      - name: Check internal links
+        run: bundle exec htmlproofer _site --disable-external --ignore-urls '/^http:\/\/127.0.0.1/,/^http:\/\/0.0.0.0/,/^http:\/\/localhost/'
+
+      - name: Publish static files to server-site branch
+        id: publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          main_ref="$(git ls-remote --exit-code origin refs/heads/main)"
+          if [ "${main_ref%%$'\t'*}" != "$GITHUB_SHA" ]; then
+            echo "A newer main revision is available; skipping this deployment."
+            exit 0
+          fi
+          # Keep checkout authentication for this repository only.
+          auth_key="http.https://github.com/.extraheader"
+          auth_value="$(git config --get "$auth_key")"
+          publish_dir="$RUNNER_TEMP/server-publish"
+          git init --quiet "$publish_dir"
+          git -C "$publish_dir" remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git -C "$publish_dir" config "$auth_key" "$auth_value"
+          trap 'git -C "$publish_dir" config --unset-all "$auth_key" || true' EXIT
+          git -C "$publish_dir" config user.name 'github-actions[bot]'
+          git -C "$publish_dir" config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          # A network/authentication failure must not be mistaken for an absent branch.
+          remote_ref="$(git -C "$publish_dir" ls-remote --heads origin refs/heads/server-site)"
+          if [ -n "$remote_ref" ]; then
+            git -C "$publish_dir" fetch --depth=1 origin server-site
+            git -C "$publish_dir" checkout -B server-site FETCH_HEAD
+            git -C "$publish_dir" rm -r --quiet --ignore-unmatch .
+          else
+            git -C "$publish_dir" checkout --orphan server-site
+          fi
+          cp -a _site/. "$publish_dir/"
+          touch "$publish_dir/.nojekyll"
+          git -C "$publish_dir" add --all
+          if git -C "$publish_dir" diff --cached --quiet; then
+            echo 'Generated site is unchanged.'
+          else
+            git -C "$publish_dir" commit -m "Publish site from ${GITHUB_SHA}"
+            git -C "$publish_dir" push origin HEAD:refs/heads/server-site
+          fi
+          echo 'notify=true' >> "$GITHUB_OUTPUT"
+
+      - name: Notify server over HTTPS
+        if: steps.publish.outputs.notify == 'true'
+        env:
+          WEBHOOK_KEY: ${{ secrets.BLOG_WEBHOOK_KEY }}
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import hmac
+          import json
+          import os
+          import subprocess
+          import time
+
+          key = os.environ["WEBHOOK_KEY"].encode()
+          if len(key) < 32:
+              raise SystemExit("Set the BLOG_WEBHOOK_KEY repository secret.")
+          body = json.dumps({"timestamp": int(time.time())}).encode()
+          signature = "sha256=" + hmac.new(key, body, hashlib.sha256).hexdigest()
+          result = subprocess.run(
+              ["curl", "--silent", "--show-error", "--fail", "--output", "/dev/null",
+               "--write-out", "%{http_code}", "--connect-timeout", "10",
+               "--max-time", "95", "--retry", "2", "--retry-max-time", "190",
+               "--header", "Content-Type: application/json",
+               "--header", "X-Hub-Signature-256: " + signature,
+               "--data-binary", "@-", os.environ["SITE_URL"] + "/_deploy/blog"],
+              input=body, stdout=subprocess.PIPE, check=True,
+          )
+          if result.stdout != b"204":
+              raise SystemExit("Unexpected webhook response: " + result.stdout.decode())
+          PY

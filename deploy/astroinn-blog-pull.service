@@ -1,0 +1,18 @@
+[Unit]
+Description=Pull published Astroinn blog static files
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=blogdeploy
+Group=blogdeploy
+ExecStart=/opt/astroinn-blog/pull-site.sh
+TimeoutStartSec=120
+Environment=GIT_TERMINAL_PROMPT=0
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/opt/astroinn-blog/data
+RestrictSUIDSGID=true
