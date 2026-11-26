@@ -116,8 +116,8 @@ jobs:
                "--header", "Content-Type: application/json",
                "--header", "X-Hub-Signature-256: " + signature,
                "--data-binary", "@-", os.environ["SITE_URL"] + "/_deploy/blog"],
-              input=body, stdout=subprocess.PIPE, check=True,
+              input=body, stdout=subprocess.PIPE,
           )
-          if result.stdout != b"204":
-              raise SystemExit("Unexpected webhook response: " + result.stdout.decode())
+          if result.returncode or result.stdout != b"204":
+              raise SystemExit(f"Webhook failed (HTTP {result.stdout.decode() or 'unknown'}).")
           PY
