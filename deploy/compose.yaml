@@ -56,7 +56,7 @@ networks:
 
 secrets:
   webhook-key:
-    file: "${WEBHOOK_KEY_FILE:-/etc/astroinn-blog/webhook-key}"
+    environment: BLOG_WEBHOOK_KEY
 
 configs:
   nginx_conf:

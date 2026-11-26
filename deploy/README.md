@@ -9,12 +9,11 @@
 ```bash
 cd /opt/astroinn-blog
 install -d -o 999 -g 996 -m 755 data
-install -d -m 700 /etc/astroinn-blog
-(umask 077; test -e /etc/astroinn-blog/webhook-key || openssl rand -hex 32 > /etc/astroinn-blog/webhook-key)
+(umask 077; test -e .env || printf 'BLOG_WEBHOOK_KEY=%s\n' "$(openssl rand -hex 32)" > .env)
 docker compose up -d
 ```
 
-把密钥保存为仓库的 Actions Secret `BLOG_WEBHOOK_KEY`。在 1Panel 为站点配置 HTTPS，首页代理到 `127.0.0.1:8080`，Webhook 使用以下路由：
+Compose 从同目录的 `.env` 读取 `BLOG_WEBHOOK_KEY` 并挂载为容器密钥。将同一个值保存为仓库的 Actions Secret `BLOG_WEBHOOK_KEY`。在 1Panel 为站点配置 HTTPS，首页代理到 `127.0.0.1:8080`，Webhook 使用以下路由：
 
 ```nginx
 location = /_deploy/blog {
