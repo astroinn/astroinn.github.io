@@ -2,7 +2,7 @@
 
 推送 main 后，GitHub Actions 构建并检查网站，将静态文件发布到公开的 server-site 分支，再通过 HTTPS 向 https://202252.xyz/_deploy/blog 发送签名通知。Debian 服务器收到通知才拉取文件，并在拉取成功后切换版本。Nginx 使用只读挂载提供网页。
 
-部署需要 Docker Compose、Git、Python 3、systemd 和提供 HTTPS 的反向代理。
+部署需要 Docker Compose、curl、Python 3、systemd 和提供 HTTPS 的反向代理。服务器经 GitHub API 获取产物分支的提交编号，再从 codeload 下载该提交的归档。
 
 ## 服务器安装
 

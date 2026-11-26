@@ -1,38 +1,58 @@
 #!/bin/bash
 set -euo pipefail
 umask 022
-export GIT_TERMINAL_PROMPT=0
-
 data=/opt/astroinn-blog/data
-repo="$data/repo.git"
 mkdir -p "$data/releases"
 exec 9>"$data/pull.lock"
 flock -w 10 9
-if [ ! -d "$repo" ]; then
-    git init --bare --quiet "$repo"
-fi
-git --git-dir="$repo" fetch --quiet --depth=1 \
-    https://github.com/astroinn/astroinn.github.io.git \
-    +refs/heads/server-site:refs/heads/server-site
-revision=$(git --git-dir="$repo" rev-parse refs/heads/server-site)
+repo=astroinn/astroinn.github.io
+revision=$(
+    curl --fail --silent --show-error --connect-timeout 5 --max-time 12 \
+        "https://api.github.com/repos/$repo/git/ref/heads/server-site" |
+    python3 -c 'import json, sys; print(json.load(sys.stdin)["object"]["sha"])'
+)
+[[ "$revision" =~ ^[a-f0-9]{40}$ ]]
 cd "$data"
 if [ "$(readlink current || true)" = "releases/$revision" ]; then
     exit 0
 fi
-# Refuse symlinks and submodules: only regular static files may be extracted.
-if git --git-dir="$repo" ls-tree -r "$revision" | awk '$1 != "100644" && $1 != "100755" { found=1 } END { exit !found }'; then
-    echo 'Refusing release containing symlinks or submodules.' >&2
-    exit 1
-fi
 stage=$(mktemp -d "$data/releases/.staging-XXXXXXXX")
 trap 'rm -rf -- "$stage"' EXIT
-git --git-dir="$repo" archive "$revision" | tar -x -C "$stage" --no-same-owner
-test -s "$stage/index.html"
-find "$stage" -type d -exec chmod 755 {} +
-find "$stage" -type f -exec chmod 644 {} +
 if [ ! -d "releases/$revision" ]; then
-    mv "$stage" "releases/$revision"
+    curl --fail --silent --show-error --connect-timeout 5 --max-time 28 \
+        --output "$stage/site.tar.gz" "https://codeload.github.com/$repo/tar.gz/$revision"
+    python3 - "$stage" <<'PY'
+import sys
+import tarfile
+from pathlib import Path, PurePosixPath
+from shutil import copyfileobj
+
+stage = Path(sys.argv[1])
+destination = stage / "files"
+destination.mkdir()
+with tarfile.open(stage / "site.tar.gz", "r:gz") as archive:
+    for member in archive:
+        path = PurePosixPath(member.name)
+        if (path.is_absolute() or ".." in path.parts or
+                not (member.isdir() or member.isfile())):
+            raise SystemExit(f"Invalid archive entry: {member.name}")
+        relative = path.parts[1:]
+        if not relative:
+            if member.isdir():
+                continue
+            raise SystemExit("Unexpected file at archive root")
+        target = destination.joinpath(*relative)
+        if member.isdir():
+            target.mkdir(parents=True, exist_ok=True)
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with archive.extractfile(member) as contents, target.open("xb") as output:
+                copyfileobj(contents, output)
+PY
+    test -s "$stage/files/index.html"
+    mv "$stage/files" "releases/$revision"
 fi
+test -s "releases/$revision/index.html"
 if [ -L current ]; then
     ln -sfn "$(readlink current)" previous.new
     mv -Tf previous.new previous
