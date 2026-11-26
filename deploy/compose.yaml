@@ -4,12 +4,220 @@ services:
     image: nginx:stable-alpine
     restart: unless-stopped
     ports:
-      - "${BLOG_BIND:-127.0.0.1}:${BLOG_PORT:-8080}:80"
+      - "127.0.0.1:${BLOG_PORT:-8080}:80"
     volumes:
-      - ./data:/srv/blog:ro
-      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - "${BLOG_DATA_DIR:-./data}:/srv/blog:ro"
+    configs:
+      - source: nginx_conf
+        target: /etc/nginx/conf.d/default.conf
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/ || exit 1"]
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/"]
       interval: 30s
       timeout: 5s
       retries: 3
+  webhook:
+    image: almir/webhook@sha256:f77cc91c91d1527b48052280af38b50791e842ad8dd291e9b360a0c13c9ca991
+    restart: unless-stopped
+    user: "0:0"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    command: ["-template", "-hooks", "/hooks.yaml", "-urlprefix", "_deploy", "-port", "8097"]
+    ports:
+      - "127.0.0.1:${WEBHOOK_PORT:-8097}:8097"
+    networks: [deploy]
+    depends_on:
+      sync:
+        condition: service_healthy
+    secrets: [webhook-key]
+    configs:
+      - {source: hooks, target: /hooks.yaml}
+      - {source: notify_worker, target: /notify-worker.sh}
+  sync:
+    image: python:3.12-slim-bookworm
+    restart: unless-stopped
+    user: "${BLOG_UID:-999}:${BLOG_GID:-996}"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    command: ["python3", "-u", "/sync.py"]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import socket; socket.create_connection(('127.0.0.1', 8081), 2).close()"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks: [deploy, default]
+    volumes:
+      - "${BLOG_DATA_DIR:-./data}:/opt/astroinn-blog/data"
+    configs:
+      - {source: sync_code, target: /sync.py}
+      - {source: pull_code, target: /pull-site.py}
+
+networks:
+  deploy: {}
+
+secrets:
+  webhook-key:
+    file: "${WEBHOOK_KEY_FILE:-/etc/astroinn-blog/webhook-key}"
+
+configs:
+  nginx_conf:
+    content: |
+      server {
+          listen 80;
+          server_name _;
+          root /srv/blog/current;
+          index index.html;
+          server_tokens off;
+          absolute_redirect off;
+          open_file_cache off;
+      
+          location / {
+              try_files $$uri $$uri/ =404;
+              add_header Cache-Control "no-cache" always;
+          }
+      
+          error_page 404 /404.html;
+          location = /404.html {
+              internal;
+              add_header Cache-Control "no-cache" always;
+          }
+      
+          location ~ /\. {
+              deny all;
+          }
+      }
+  hooks:
+    content: |
+      {{ if not (cat "/run/secrets/webhook-key") }}{{ template "missing-webhook-secret" . }}{{ end }}
+      - id: blog
+        http-methods: [POST]
+        execute-command: /bin/sh
+        pass-arguments-to-command:
+          - {source: string, name: /notify-worker.sh}
+          - {source: payload, name: timestamp}
+        include-command-output-in-response: true
+        success-http-response-code: 204
+        trigger-rule-mismatch-http-response-code: 403
+        trigger-signature-soft-failures: true
+        trigger-rule:
+          or:
+            - match:
+                type: payload-hmac-sha256
+                secret: '{{ cat "/run/secrets/webhook-key" | js }}'
+                parameter: {source: header, name: X-Hub-Signature-256}
+  notify_worker:
+    content: |
+      #!/bin/sh
+      set -eu
+      exec wget -q -O /dev/null -T 80 --post-data="$$1" http://sync:8081/sync
+  sync_code:
+    content: |
+      import re
+      import subprocess
+      import time
+      from http.server import BaseHTTPRequestHandler, HTTPServer
+      
+      
+      class Handler(BaseHTTPRequestHandler):
+          def do_POST(self):
+              self.connection.settimeout(5)
+              raw = self.headers.get("Content-Length", "")
+              if self.path != "/sync" or not re.fullmatch(r"\d{1,2}", raw) or int(raw) > 16:
+                  self.send_error(400)
+                  return
+              timestamp = self.rfile.read(int(raw))
+              if not re.fullmatch(rb"[0-9]{1,12}", timestamp) or abs(time.time() - int(timestamp)) > 300:
+                  self.send_error(403)
+                  return
+              try:
+                  subprocess.run(["python3", "-u", "/pull-site.py"], timeout=70, check=True)
+              except (OSError, subprocess.SubprocessError):
+                  self.send_error(503)
+                  return
+              self.send_response(204)
+              self.end_headers()
+      
+      
+      HTTPServer(("0.0.0.0", 8081), Handler).serve_forever()
+  pull_code:
+    content: |
+      import fcntl
+      import json
+      import os
+      import re
+      import shutil
+      import tarfile
+      import tempfile
+      from pathlib import Path, PurePosixPath
+      from urllib.request import urlopen
+      
+      
+      DATA = Path("/opt/astroinn-blog/data")
+      REPO = "astroinn/astroinn.github.io"
+      
+      
+      def switch_link(name, destination):
+          pending = DATA / (name + ".new")
+          pending.unlink(missing_ok=True)
+          pending.symlink_to(destination)
+          pending.replace(DATA / name)
+      
+      
+      def unpack(archive, destination):
+          with tarfile.open(archive, "r:gz") as tar:
+              for member in tar:
+                  path = PurePosixPath(member.name)
+                  if path.is_absolute() or ".." in path.parts or not (member.isdir() or member.isfile()):
+                      raise ValueError(f"Unexpected archive entry: {member.name}")
+                  parts = path.parts[1:]
+                  if not parts:
+                      if member.isdir():
+                          continue
+                      raise ValueError("Unexpected file at archive root")
+                  target = destination.joinpath(*parts)
+                  if member.isdir():
+                      target.mkdir(parents=True, exist_ok=True)
+                  else:
+                      target.parent.mkdir(parents=True, exist_ok=True)
+                      with tar.extractfile(member) as source, target.open("xb") as output:
+                          shutil.copyfileobj(source, output)
+      
+      
+      def deploy():
+          os.umask(0o022)
+          releases = DATA / "releases"
+          releases.mkdir(exist_ok=True)
+          with (DATA / "pull.lock").open("a") as lock:
+              fcntl.flock(lock, fcntl.LOCK_EX)
+              endpoint = f"https://api.github.com/repos/{REPO}/git/ref/heads/server-site"
+              with urlopen(endpoint, timeout=12) as response:
+                  revision = json.load(response)["object"]["sha"]
+              if not re.fullmatch(r"[a-f0-9]{40}", revision):
+                  raise ValueError("Invalid release revision")
+              current = DATA / "current"
+              previous_target = os.readlink(current) if current.is_symlink() else None
+              target = f"releases/{revision}"
+              if previous_target == target:
+                  return
+              release = DATA / target
+              if not release.exists():
+                  with tempfile.TemporaryDirectory(prefix=".staging-", dir=releases) as temporary:
+                      stage = Path(temporary)
+                      archive = stage / "site.tar.gz"
+                      url = f"https://codeload.github.com/{REPO}/tar.gz/{revision}"
+                      with urlopen(url, timeout=28) as response, archive.open("wb") as output:
+                          shutil.copyfileobj(response, output)
+                      files = stage / "files"
+                      files.mkdir()
+                      unpack(archive, files)
+                      if (files / "index.html").stat().st_size == 0:
+                          raise ValueError("Empty index")
+                      files.rename(release)
+              if (release / "index.html").stat().st_size == 0:
+                  raise ValueError("Empty index")
+              if previous_target:
+                  switch_link("previous", previous_target)
+              switch_link("current", target)
+              print(f"Activated release {revision}")
+      
+      
+      deploy()
